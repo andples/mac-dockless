@@ -147,7 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refresh() {
         let hidden = Dock.isHidden
         statusItem.button?.image = NSImage(systemSymbolName: hidden ? "dock.arrow.down.rectangle" : "dock.rectangle",
-                                           accessibilityDescription: "Dockless")
+                                           accessibilityDescription: "Dockless")?
+            // Match the size of the system's own menu bar icons (symbols default to a smaller size).
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .regular))
         let menu = NSMenu()
         let toggle = NSMenuItem(title: "Hide Dock", action: #selector(toggle), keyEquivalent: "d")
         toggle.keyEquivalentModifierMask = [.control, .option, .command]

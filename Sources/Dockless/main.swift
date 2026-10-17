@@ -8,31 +8,75 @@ enum Dock {
     private static let domain = "com.apple.dock" as CFString
     private static let hiddenDelay = 1000.0
 
+    /// Every Dock preference Dockless changes while hiding, and the value it sets.
+    /// Bouncing icons (app launches, apps wanting attention) would otherwise pop the hidden Dock up.
+    private static let managed: [(key: String, value: Any)] = [
+        ("autohide", true),
+        ("autohide-delay", hiddenDelay),
+        ("no-bouncing", true),
+        ("launchanim", false),
+    ]
+
     static var isHidden: Bool {
         CFPreferencesAppSynchronize(domain)
         return (value("autohide-delay") as? Double ?? 0) >= 100 && (value("autohide") as? Bool ?? false)
     }
 
+    /// Hidden with every managed preference in place (false after upgrading from a version that set fewer).
+    static var isFullyHidden: Bool {
+        CFPreferencesAppSynchronize(domain)
+        return managed.allSatisfy { (value($0.key) as? NSObject)?.isEqual($0.value) ?? false }
+    }
+
+    /// The user's own values, saved the first time Dockless overrides each key. A key in `savedKeys`
+    /// but missing from `originals` was unset originally and gets deleted again on restore.
+    private static var originals: [String: Any] {
+        get { UserDefaults.standard.dictionary(forKey: "originals") ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "originals") }
+    }
+    private static var savedKeys: [String] {
+        get { UserDefaults.standard.stringArray(forKey: "savedKeys") ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: "savedKeys") }
+    }
+
     static func setHidden(_ hidden: Bool) {
-        let d = UserDefaults.standard
+        migrate()
+        var saved = savedKeys
+        var orig = originals
         if hidden {
-            // Remember the user's own settings so showing the Dock puts them back exactly.
-            if !isHidden {
-                d.set(value("autohide") as? Bool ?? false, forKey: "originalAutohide")
-                if let delay = value("autohide-delay") as? Double {
-                    d.set(delay, forKey: "originalDelay")
-                } else {
-                    d.removeObject(forKey: "originalDelay")
+            for (key, newValue) in managed {
+                if !saved.contains(key) {
+                    saved.append(key)
+                    orig[key] = value(key)
                 }
+                set(key, newValue)
             }
-            set("autohide", true)
-            set("autohide-delay", hiddenDelay)
         } else {
-            set("autohide-delay", d.object(forKey: "originalDelay") as? Double)
-            set("autohide", d.object(forKey: "originalAutohide") as? Bool ?? true)
+            for (key, _) in managed where saved.contains(key) {
+                set(key, orig[key])
+                orig[key] = nil
+            }
+            saved = []
         }
+        savedKeys = saved
+        originals = orig
         CFPreferencesAppSynchronize(domain)
         restartDock()
+    }
+
+    /// Earlier versions saved only autohide and its delay, under separate keys.
+    private static func migrate() {
+        let d = UserDefaults.standard
+        guard let autohide = d.object(forKey: "originalAutohide") as? Bool else { return }
+        var orig = originals
+        var saved = savedKeys
+        orig["autohide"] = autohide
+        orig["autohide-delay"] = d.object(forKey: "originalDelay")
+        for key in ["autohide", "autohide-delay"] where !saved.contains(key) { saved.append(key) }
+        originals = orig
+        savedKeys = saved
+        d.removeObject(forKey: "originalAutohide")
+        d.removeObject(forKey: "originalDelay")
     }
 
     private static func value(_ key: String) -> Any? {
@@ -68,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         // Re-apply the last choice (e.g. after a login or a crash that restored nothing).
-        if d.bool(forKey: "wantHidden") && !Dock.isHidden { Dock.setHidden(true) }
+        if d.bool(forKey: "wantHidden") && !Dock.isFullyHidden { Dock.setHidden(true) }
         installHotKeyHandler()
         registerHotKey()
         // The hotkey follows the layout, so re-bind it when the layout changes.

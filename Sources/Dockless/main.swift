@@ -97,6 +97,23 @@ enum Dock {
     }
 }
 
+/// Menu bar icon drawn the way most apps do (Claude, for one): a ~16pt template glyph centred on a 24pt canvas,
+/// shown in a variable-length status item so the system supplies the standard spacing.
+func menuBarIcon(_ symbol: String, description: String) -> NSImage? {
+    guard let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: description) else { return nil }
+    let canvas = NSSize(width: 24, height: 24), box: CGFloat = 20 // symbol images carry ~20% padding: this gives a ~16pt glyph
+    let s = box / max(glyph.size.width, glyph.size.height, 1)
+    let size = NSSize(width: glyph.size.width * s, height: glyph.size.height * s)
+    let image = NSImage(size: canvas, flipped: false) { _ in
+        glyph.draw(in: NSRect(x: (canvas.width - size.width) / 2, y: (canvas.height - size.height) / 2,
+                              width: size.width, height: size.height))
+        return true
+    }
+    image.isTemplate = true
+    image.accessibilityDescription = description
+    return image
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -110,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // Re-apply the last choice (e.g. after a login or a crash that restored nothing).
         if d.bool(forKey: "wantHidden") && !Dock.isFullyHidden { Dock.setHidden(true) }
         installHotKeyHandler()
@@ -146,10 +163,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refresh() {
         let hidden = Dock.isHidden
-        statusItem.button?.image = NSImage(systemSymbolName: hidden ? "dock.arrow.down.rectangle" : "dock.rectangle",
-                                           accessibilityDescription: "Dockless")?
-            // Match the size of the system's own menu bar icons (symbols default to a smaller size).
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .regular))
+        statusItem.button?.image = menuBarIcon(hidden ? "dock.arrow.down.rectangle" : "dock.rectangle",
+                                               description: "Dockless")
         let menu = NSMenu()
         let toggle = NSMenuItem(title: "Hide Dock", action: #selector(toggle), keyEquivalent: "d")
         toggle.keyEquivalentModifierMask = [.control, .option, .command]

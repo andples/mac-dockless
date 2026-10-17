@@ -3,46 +3,53 @@ import Carbon.HIToolbox
 import ServiceManagement
 
 /// Hides the Dock by making its auto-hide reveal delay effectively infinite.
+/// Reads and writes the Dock's preferences directly; only restarting the Dock needs a process.
 enum Dock {
-    private static let hiddenDelay = "1000"
+    private static let domain = "com.apple.dock" as CFString
+    private static let hiddenDelay = 1000.0
 
     static var isHidden: Bool {
-        guard let delay = Double(read("autohide-delay") ?? "") else { return false }
-        return delay >= 100 && read("autohide") == "1"
+        CFPreferencesAppSynchronize(domain)
+        return (value("autohide-delay") as? Double ?? 0) >= 100 && (value("autohide") as? Bool ?? false)
     }
 
     static func setHidden(_ hidden: Bool) {
         let d = UserDefaults.standard
         if hidden {
-            // Remember the user's own auto-hide setting so showing the Dock puts it back exactly.
-            if !isHidden { d.set(read("autohide") == "1", forKey: "originalAutohide") }
-            run("/usr/bin/defaults", "write", "com.apple.dock", "autohide", "-bool", "true")
-            run("/usr/bin/defaults", "write", "com.apple.dock", "autohide-delay", "-float", hiddenDelay)
+            // Remember the user's own settings so showing the Dock puts them back exactly.
+            if !isHidden {
+                d.set(value("autohide") as? Bool ?? false, forKey: "originalAutohide")
+                if let delay = value("autohide-delay") as? Double {
+                    d.set(delay, forKey: "originalDelay")
+                } else {
+                    d.removeObject(forKey: "originalDelay")
+                }
+            }
+            set("autohide", true)
+            set("autohide-delay", hiddenDelay)
         } else {
-            run("/usr/bin/defaults", "delete", "com.apple.dock", "autohide-delay")
-            let original = d.object(forKey: "originalAutohide") as? Bool ?? true
-            run("/usr/bin/defaults", "write", "com.apple.dock", "autohide", "-bool", original ? "true" : "false")
+            set("autohide-delay", d.object(forKey: "originalDelay") as? Double)
+            set("autohide", d.object(forKey: "originalAutohide") as? Bool ?? true)
         }
-        run("/usr/bin/killall", "Dock")
+        CFPreferencesAppSynchronize(domain)
+        restartDock()
     }
 
-    private static func read(_ key: String) -> String? {
-        let out = run("/usr/bin/defaults", "read", "com.apple.dock", key)
-        return out?.trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func value(_ key: String) -> Any? {
+        CFPreferencesCopyAppValue(key as CFString, domain)
     }
 
-    @discardableResult
-    private static func run(_ path: String, _ args: String...) -> String? {
+    /// nil deletes the key.
+    private static func set(_ key: String, _ value: Any?) {
+        CFPreferencesSetAppValue(key as CFString, value as CFPropertyList?, domain)
+    }
+
+    private static func restartDock() {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        p.arguments = ["Dock"]
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        try? p.run()
     }
 }
 
@@ -50,6 +57,7 @@ enum Dock {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotKey: EventHotKeyRef?
+    private var signalSources: [DispatchSourceSignal] = []
     private let d = UserDefaults.standard
 
     private var restoreOnQuit: Bool {
@@ -61,14 +69,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         // Re-apply the last choice (e.g. after a login or a crash that restored nothing).
         if d.bool(forKey: "wantHidden") && !Dock.isHidden { Dock.setHidden(true) }
+        installHotKeyHandler()
         registerHotKey()
+        // The hotkey follows the layout, so re-bind it when the layout changes.
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.registerHotKey() } }
         refresh()
+        // Handle termination signals on the main queue (not in signal context), restoring the Dock first.
         for sig in [SIGTERM, SIGINT, SIGHUP] {
-            signal(sig) { s in
-                if UserDefaults.standard.object(forKey: "restoreOnQuit") as? Bool ?? true { Dock.setHidden(false) }
-                signal(s, SIG_DFL)
-                raise(s)
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in
+                if self?.restoreOnQuit ?? true, Dock.isHidden { Dock.setHidden(false) }
+                exit(0)
             }
+            source.resume()
+            signalSources.append(source)
         }
     }
 
@@ -120,16 +137,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
-    /// ⌃⌥⌘D toggles the Dock from anywhere (no permissions needed).
-    private func registerHotKey() {
+    private func installHotKeyHandler() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
             MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.toggle() }
             return noErr
         }, 1, &spec, nil, nil)
+    }
+
+    /// ⌃⌥⌘D toggles the Dock from anywhere (no permissions needed).
+    func registerHotKey() {
+        if let hotKey { UnregisterEventHotKey(hotKey) }
+        hotKey = nil
         let id = EventHotKeyID(signature: OSType(0x444B4C53), id: 1) // "DKLS"
-        RegisterEventHotKey(UInt32(Self.keyCode(for: "d") ?? kVK_ANSI_D), UInt32(controlKey | optionKey | cmdKey), id,
-                            GetApplicationEventTarget(), 0, &hotKey)
+        let status = RegisterEventHotKey(UInt32(Self.keyCode(for: "d") ?? kVK_ANSI_D), UInt32(controlKey | optionKey | cmdKey),
+                                         id, GetApplicationEventTarget(), 0, &hotKey)
+        if status != noErr { NSLog("Dockless: couldn't register ⌃⌥⌘D (\(status)); it may be taken by another app") }
     }
 }
 
@@ -146,7 +169,7 @@ extension AppDelegate {
                 var chars = [UniChar](repeating: 0, count: 4)
                 guard UCKeyTranslate(layout, code, UInt16(kUCKeyActionDisplay), 0, UInt32(LMGetKbdType()),
                                      OptionBits(1 << kUCKeyTranslateNoDeadKeysBit), &dead, 4, &length, &chars) == noErr,
-                      length == 1, Character(UnicodeScalar(chars[0])!) == char else { continue }
+                      length == 1, let scalar = UnicodeScalar(chars[0]), Character(scalar) == char else { continue }
                 return Int(code)
             }
             return nil

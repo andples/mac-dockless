@@ -117,8 +117,10 @@ enum Dock {
 
 /// Menu bar icon drawn the way most apps do (Claude, for one): a ~16pt template glyph centred on a 24pt canvas,
 /// shown in a variable-length status item so the system supplies the standard spacing.
-func menuBarIcon(_ symbol: String, description: String) -> NSImage? {
-    guard let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: description) else { return nil }
+/// With a `tint` the glyph is drawn in that colour instead of following the menu bar.
+func menuBarIcon(_ symbol: String, description: String, tint: NSColor? = nil) -> NSImage? {
+    guard var glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: description) else { return nil }
+    if let tint, let tinted = glyph.withSymbolConfiguration(.init(paletteColors: [tint])) { glyph = tinted }
     let canvas = NSSize(width: 24, height: 24), box: CGFloat = 20 // symbol images carry ~20% padding: this gives a ~16pt glyph
     let s = box / max(glyph.size.width, glyph.size.height, 1)
     let size = NSSize(width: glyph.size.width * s, height: glyph.size.height * s)
@@ -127,7 +129,7 @@ func menuBarIcon(_ symbol: String, description: String) -> NSImage? {
                               width: size.width, height: size.height))
         return true
     }
-    image.isTemplate = true
+    image.isTemplate = tint == nil
     image.accessibilityDescription = description
     return image
 }
@@ -138,9 +140,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: EventHotKeyRef?
     private var signalSources: [DispatchSourceSignal] = []
     private let d = UserDefaults.standard
+    private var theme: ThemeFollower?
+    /// The utheme palette on screen; nil shows the plain system look.
+    private var palette: Palette?
     /// Set when macOS is logging out, restarting or shutting down. Dockless then leaves the Dock hidden
     /// instead of restoring it, so there is no Dock restart on the way out and none again at the next login.
     private var sessionEnding = false
+
+    /// `defaults write com.andples.dockless theme system` stops following utheme.
+    private var followsUtheme: Bool { (d.string(forKey: "theme") ?? "utheme") == "utheme" }
 
     private var restoreOnQuit: Bool {
         get { d.object(forKey: "restoreOnQuit") as? Bool ?? true }
@@ -158,6 +166,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main
         ) { _ in MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.registerHotKey() } }
         refresh()
+        if followsUtheme {
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+            let t = ThemeFollower(app: "dockless", version: version)
+            t.onChange = { [weak self] p in
+                self?.palette = p
+                self?.refresh()
+            }
+            theme = t
+            t.start()
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
         ) { _ in MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.sessionEnding = true } }
@@ -167,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler { [weak self] in
                 self?.restoreIfQuitting()
+                self?.theme?.stop()
                 exit(0)
             }
             source.resume()
@@ -176,6 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         restoreIfQuitting()
+        theme?.stop()
     }
 
     private func restoreIfQuitting() {
@@ -191,8 +211,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refresh() {
         let hidden = Dock.isHidden
+        // With utheme, the hidden-Dock glyph takes the theme's accent; the shown one keeps following the menu bar.
         statusItem.button?.image = menuBarIcon(hidden ? "dock.arrow.down.rectangle" : "dock.rectangle",
-                                               description: "Dockless")
+                                               description: "Dockless", tint: hidden ? palette?.color("accent") : nil)
         let menu = NSMenu()
         let toggle = NSMenuItem(title: "Hide Dock", action: #selector(toggle), keyEquivalent: "d")
         toggle.keyEquivalentModifierMask = [.control, .option, .command]
@@ -210,7 +231,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(login)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Dockless", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        if let palette { style(menu, palette) }
         statusItem.menu = menu
+    }
+
+    /// The menu in the theme's light/dark, with its titles in the theme's foreground.
+    private func style(_ menu: NSMenu, _ p: Palette) {
+        menu.appearance = NSAppearance(named: p.isDark ? .darkAqua : .aqua)
+        guard let fg = p.color("foreground") else { return }
+        for item in menu.items where !item.isSeparatorItem {
+            item.attributedTitle = NSAttributedString(string: item.title,
+                                                      attributes: [.foregroundColor: fg, .font: NSFont.menuFont(ofSize: 0)])
+        }
     }
 
     @objc private func toggleRestore() {

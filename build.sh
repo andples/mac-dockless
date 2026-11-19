@@ -23,7 +23,9 @@ codesign --force --sign "$IDENTITY" "$APP"
 echo "built $APP (signed: $IDENTITY)"
 
 if [[ "${1:-}" == "--install" ]]; then
-  pkill -x Dockless || true
+  # SIGKILL skips the restore-on-quit, so the Dock isn't restarted twice: the new copy finds the Dock
+  # already set the way it wants and leaves it alone.
+  pkill -KILL -x Dockless || true
   sleep 1
   rm -rf /Applications/Dockless.app
   cp -R "$APP" /Applications/

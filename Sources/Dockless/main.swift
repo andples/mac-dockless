@@ -25,7 +25,16 @@ enum Dock {
     /// Hidden with every managed preference in place (false after upgrading from a version that set fewer).
     static var isFullyHidden: Bool {
         CFPreferencesAppSynchronize(domain)
-        return managed.allSatisfy { (value($0.key) as? NSObject)?.isEqual($0.value) ?? false }
+        return managed.allSatisfy { same(value($0.key), $0.value) }
+    }
+
+    /// Preference values compare by value (1000 and 1000.0 are the same); nil means unset.
+    private static func same(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (a?, b?): return (a as AnyObject).isEqual(b)
+        default: return false
+        }
     }
 
     /// The user's own values, saved the first time Dockless overrides each key. A key in `savedKeys`
@@ -39,21 +48,30 @@ enum Dock {
         set { UserDefaults.standard.set(newValue, forKey: "savedKeys") }
     }
 
+    /// Restarts the Dock only if a preference actually changed. A Dock restart rebuilds every full-screen
+    /// space, and doing that while apps are going full screen (at login, say) can leave the menu bar stuck
+    /// showing in full screen until the next reboot.
     static func setHidden(_ hidden: Bool) {
         migrate()
+        CFPreferencesAppSynchronize(domain)
         var saved = savedKeys
         var orig = originals
+        var changed = false
+        func apply(_ key: String, _ newValue: Any?) {
+            if !same(value(key), newValue) { changed = true }
+            set(key, newValue)
+        }
         if hidden {
             for (key, newValue) in managed {
                 if !saved.contains(key) {
                     saved.append(key)
                     orig[key] = value(key)
                 }
-                set(key, newValue)
+                apply(key, newValue)
             }
         } else {
             for (key, _) in managed where saved.contains(key) {
-                set(key, orig[key])
+                apply(key, orig[key])
                 orig[key] = nil
             }
             saved = []
@@ -61,7 +79,7 @@ enum Dock {
         savedKeys = saved
         originals = orig
         CFPreferencesAppSynchronize(domain)
-        restartDock()
+        if changed { restartDock() }
     }
 
     /// Earlier versions saved only autohide and its delay, under separate keys.
@@ -120,6 +138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: EventHotKeyRef?
     private var signalSources: [DispatchSourceSignal] = []
     private let d = UserDefaults.standard
+    /// Set when macOS is logging out, restarting or shutting down. Dockless then leaves the Dock hidden
+    /// instead of restoring it, so there is no Dock restart on the way out and none again at the next login.
+    private var sessionEnding = false
 
     private var restoreOnQuit: Bool {
         get { d.object(forKey: "restoreOnQuit") as? Bool ?? true }
@@ -137,12 +158,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main
         ) { _ in MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.registerHotKey() } }
         refresh()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { (NSApp.delegate as? AppDelegate)?.sessionEnding = true } }
         // Handle termination signals on the main queue (not in signal context), restoring the Dock first.
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler { [weak self] in
-                if self?.restoreOnQuit ?? true, Dock.isHidden { Dock.setHidden(false) }
+                self?.restoreIfQuitting()
                 exit(0)
             }
             source.resume()
@@ -151,7 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if restoreOnQuit && Dock.isHidden { Dock.setHidden(false) }
+        restoreIfQuitting()
+    }
+
+    private func restoreIfQuitting() {
+        if restoreOnQuit && !sessionEnding && Dock.isHidden { Dock.setHidden(false) }
     }
 
     @objc func toggle() {

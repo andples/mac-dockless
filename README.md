@@ -42,7 +42,14 @@ Why it sometimes seemed to clear when Dockless quit: switching spaces mid-animat
 right size (the stuck state comes back once the switch settles).
 
 **Fix without a reboot:** `killall MenuBarAgent` (macOS relaunches it at once), then take the app out of
-full screen and back in. To check after a display change:
+full screen and back in. The owner's dotfiles have `fixmenubar install`, which does this automatically
+whenever MenuBarAgent misses a display change, and logs it.
+
+Reported elsewhere on macOS 27, none from Apple: the same stuck full-screen menu bar, fixed by restarting
+MenuBarAgent ([dimble #166](https://github.com/fif7y/dimble/issues/166)); MenuBarAgent not refreshing after
+display changes ([Hidden PR #47](https://github.com/floweredao/hidden/pull/47),
+[StableBar #820](https://github.com/stablebox/StableBar/issues/820)); the whole menu bar ignoring clicks until
+`killall MenuBarAgent` ([macos27-beta-issues #35](https://github.com/jizhi0v0/macos27-beta-issues/issues/35)). To check after a display change:
 `log show --last 1h --predicate 'eventMessage CONTAINS "did not respond"'`
 
 ## Install

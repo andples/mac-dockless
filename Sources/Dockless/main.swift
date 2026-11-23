@@ -48,9 +48,9 @@ enum Dock {
         set { UserDefaults.standard.set(newValue, forKey: "savedKeys") }
     }
 
-    /// Restarts the Dock only if a preference actually changed. A Dock restart rebuilds every full-screen
-    /// space, and doing that while apps are going full screen (at login, say) can leave the menu bar stuck
-    /// showing in full screen until the next reboot.
+    /// Restarts the Dock only if a preference actually changed, so there's no needless flicker.
+    /// (A menu bar stuck in full-screen apps was once blamed on these restarts; it's macOS's MenuBarAgent
+    /// missing display changes, see the README.)
     static func setHidden(_ hidden: Bool) {
         migrate()
         CFPreferencesAppSynchronize(domain)

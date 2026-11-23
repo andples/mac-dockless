@@ -211,9 +211,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refresh() {
         let hidden = Dock.isHidden
-        // With utheme, the hidden-Dock glyph takes the theme's accent; the shown one keeps following the menu bar.
+        // The icon stays black or white like the rest of the menu bar; only the menu follows utheme.
         statusItem.button?.image = menuBarIcon(hidden ? "dock.arrow.down.rectangle" : "dock.rectangle",
-                                               description: "Dockless", tint: hidden ? palette?.color("accent") : nil)
+                                               description: "Dockless")
         let menu = NSMenu()
         let toggle = NSMenuItem(title: "Hide Dock", action: #selector(toggle), keyEquivalent: "d")
         toggle.keyEquivalentModifierMask = [.control, .option, .command]
